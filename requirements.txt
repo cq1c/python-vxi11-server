@@ -1,0 +1,6 @@
+# VXI-11 转发器依赖
+python-dotenv>=1.0.0
+# 可选：VXI-11 客户端库，用于真实设备连接
+python-vxi11>=0.9
+# 打包工具
+pyinstaller>=5.0
