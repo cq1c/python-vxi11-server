@@ -1,12 +1,3 @@
-# python
-*.pyc
-__pycache__
-
-# emacs 
-*.*~
-*.*#
-build
-node_modules
 # Logs
 logs
 *.log
