@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import socket
 import sys
 import threading
 import time
@@ -88,6 +89,32 @@ def default_view_url() -> str:
         return local_index.resolve().as_uri()
 
     return 'http://localhost:5173'
+
+
+def get_local_ipv4() -> str | None:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(('8.8.8.8', 80))
+            host = sock.getsockname()[0]
+            if host and not host.startswith('127.'):
+                return host
+    except OSError:
+        pass
+
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            host = info[4][0]
+            if host and not host.startswith('127.'):
+                return host
+    except OSError:
+        pass
+
+    return None
+
+
+def default_source_address() -> str:
+    host = get_local_ipv4() or '0.0.0.0'
+    return f'TCPIP::{host}::inst0::INSTR'
 
 
 def format_exception(exc: Exception) -> str:
@@ -197,6 +224,12 @@ class JsApi:
             'running': self._running,
             'source': self._source,
             'target': self._target,
+        }
+
+    def get_default_source_address(self):
+        return {
+            'address': default_source_address(),
+            'host': get_local_ipv4() or '0.0.0.0',
         }
 
     def start_mapping(self, source_addr: str, target_addr: str):

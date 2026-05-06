@@ -14,6 +14,7 @@ interface PyApi {
   stop_mapping: () => Promise<ApiResult>
   validate_address: (addr: string) => Promise<ApiResult>
   get_status: () => Promise<{ running: boolean; source: string | null; target: string | null }>
+  get_default_source_address: () => Promise<{ address: string; host: string }>
 }
 
 interface LogEntry {
@@ -28,10 +29,11 @@ const STORAGE_KEYS = {
   logs: 'visa-mapping-logs',
 } as const
 const MAX_LOGS = 1000
+const LEGACY_DEFAULT_SOURCE = 'TCPIP::127.0.0.1::inst0::INSTR'
 
 const formRef = ref<FormInstance>()
 const form = reactive({
-  source: 'TCPIP::127.0.0.1::inst0::INSTR',
+  source: 'TCPIP::0.0.0.0::inst0::INSTR',
   target: 'TCPIP::192.168.1.10::inst0::INSTR',
 })
 const running = ref(false)
@@ -90,13 +92,15 @@ function isLogEntry(value: unknown): value is LogEntry {
 
 function restoreForm() {
   const raw = readStorageItem(STORAGE_KEYS.form)
-  if (!raw) return
+  if (!raw) return false
   try {
     const saved = JSON.parse(raw) as Partial<typeof form>
     if (typeof saved.source === 'string') form.source = saved.source
     if (typeof saved.target === 'string') form.target = saved.target
+    return true
   } catch {
     // Ignore malformed saved state.
+    return false
   }
 }
 
@@ -174,7 +178,7 @@ function clearLogs() {
   persistLogs()
 }
 
-restoreForm()
+const restoredForm = restoreForm()
 restoreLogs()
 watch(form, persistForm, { deep: true })
 
@@ -226,6 +230,9 @@ onMounted(async () => {
     running.value = true
     if (status.source) form.source = status.source
     if (status.target) form.target = status.target
+  } else if (!restoredForm || form.source === LEGACY_DEFAULT_SOURCE) {
+    const source = await bridge.get_default_source_address()
+    form.source = source.address
   }
 })
 
@@ -257,7 +264,7 @@ onBeforeUnmount(() => {
         <el-form-item label="映射设备地址" prop="source">
           <el-input
             v-model="form.source"
-            placeholder="TCPIP::127.0.0.1::inst0::INSTR"
+            placeholder="TCPIP::0.0.0.0::inst0::INSTR"
             clearable
           />
         </el-form-item>
