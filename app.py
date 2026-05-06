@@ -18,7 +18,45 @@ import webview
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import vxi11_server as Vxi11
+from vxi11_server import rpc as vxi11_rpc
 from vxi11_server import vxi11 as vxi11_proto
+from vxi11_server.portmap_server import PortMapServer
+
+
+def _local_host(host: str) -> str:
+    """Return a host string that's actually connectable via TCP.
+
+    InstrumentServer binds to `''` which becomes `('0.0.0.0', port)` after
+    bind. Connecting to `0.0.0.0` works on Linux but raises WinError 10049
+    on Windows. Always rewrite to loopback for our embedded portmap calls.
+    """
+    if not host or host in ('0.0.0.0', '::'):
+        return '127.0.0.1'
+    return host
+
+
+# Patch the upstream rpc.TCPServer so register_pmap/unregister talk to a
+# loopback portmapper instead of '' / '0.0.0.0'. This keeps the existing
+# InstrumentServer.listen() / .close() flow working unmodified on Windows.
+
+def _patched_register_pmap(self):
+    host, _port = self.server_address
+    p = vxi11_rpc.TCPPortMapperClient(_local_host(host))
+    if not p.set(self.mapping):
+        raise vxi11_rpc.RPCError('register failed')
+    self.registered = True
+
+
+def _patched_unregister(self):
+    host, _port = self.server_address
+    p = vxi11_rpc.TCPPortMapperClient(_local_host(host))
+    if not p.unset(self.mapping):
+        raise vxi11_rpc.RPCError('unregister failed')
+    self.registered = False
+
+
+vxi11_rpc.TCPServer.register_pmap = _patched_register_pmap
+vxi11_rpc.TCPServer.unregister = _patched_unregister
 
 
 # TCPIP[board]::host[::device]::INSTR  (case-insensitive, ignore surrounding whitespace)
@@ -92,6 +130,7 @@ class JsApi:
     def __init__(self):
         self._window = None
         self._server = None
+        self._portmap = None
         self._running = False
         self._source = None
         self._target = None
@@ -150,6 +189,16 @@ class JsApi:
                 MappingDevice.target_address = target_addr.strip()
                 MappingDevice.log_sink = self.push_log
 
+                self._portmap = PortMapServer()
+                try:
+                    self._portmap.start()
+                except OSError as exc:
+                    self._portmap = None
+                    self.push_log(
+                        'WARN',
+                        f'本地 portmap 端口被占用 (已使用系统已有的): {exc}',
+                    )
+
                 # InstrumentServer always registers a default 'inst0'. If the
                 # user's source device is 'inst0', override that default;
                 # otherwise add the mapping device as an extra handler.
@@ -186,8 +235,31 @@ class JsApi:
         if self._server is not None:
             try:
                 self._server.close()
+            except Exception as exc:
+                # listen() can fail partway (abort thread started, core not),
+                # in which case socketserver.shutdown() on the un-served core
+                # server would deadlock waiting on its __is_shut_down event.
+                # Tear servers down with a bounded join.
+                self.push_log('WARN', f'instrument server 收尾异常 (已忽略): {exc}')
+                for srv_attr in ('coreServer', 'abortServer'):
+                    srv = getattr(self._server, srv_attr, None)
+                    if srv is None:
+                        continue
+                    t = threading.Thread(target=srv.shutdown, daemon=True)
+                    t.start()
+                    t.join(timeout=1.5)
+                    try:
+                        srv.server_close()
+                    except Exception:
+                        pass
             finally:
                 self._server = None
+        if self._portmap is not None:
+            try:
+                self._portmap.stop()
+            except Exception as exc:
+                self.push_log('WARN', f'portmap stop 异常 (已忽略): {exc}')
+            self._portmap = None
         self._running = False
         self._source = None
         self._target = None
