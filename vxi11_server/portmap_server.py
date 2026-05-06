@@ -102,9 +102,11 @@ class PortMapServer:
         logger.info('portmap listening on %s:%d', self.host, self.port)
 
     async def _shutdown(self) -> None:
-        if self._tcp_server is not None:
-            self._tcp_server.close()
-            self._tcp_server = None
+        tcp_server = self._tcp_server
+        self._tcp_server = None
+        if tcp_server is not None:
+            tcp_server.close()
+            await tcp_server.wait_closed()
         # Force-close active connections; wait_closed() would otherwise hang
         # until every client peer closes its socket.
         for w in list(self._writers):
@@ -116,6 +118,7 @@ class PortMapServer:
         if self._udp_transport is not None:
             self._udp_transport.close()
             self._udp_transport = None
+            await asyncio.sleep(0)
 
     # ---- transport handlers ------------------------------------------
 

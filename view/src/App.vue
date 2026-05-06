@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { CaretRight, VideoPause, Delete } from '@element-plus/icons-vue'
 
@@ -14,7 +14,6 @@ interface PyApi {
   stop_mapping: () => Promise<ApiResult>
   validate_address: (addr: string) => Promise<ApiResult>
   get_status: () => Promise<{ running: boolean; source: string | null; target: string | null }>
-  confirm_exit: () => Promise<ApiResult>
 }
 
 interface LogEntry {
@@ -34,7 +33,6 @@ const running = ref(false)
 const loading = ref(false)
 const logs = ref<LogEntry[]>([])
 const logBox = ref<HTMLDivElement>()
-const exitDialogOpen = ref(false)
 
 const rules: FormRules = {
   source: [
@@ -114,7 +112,7 @@ async function toggleMapping() {
     loading.value = true
     try {
       const res = await bridge.stop_mapping()
-      if (!res.ok) ElMessage.error(res.message ?? '停止失败')
+      if (!res.ok) ElMessage.error(res.message || '停止失败')
       else running.value = false
     } finally {
       loading.value = false
@@ -129,7 +127,7 @@ async function toggleMapping() {
   try {
     const res = await bridge.start_mapping(form.source, form.target)
     if (!res.ok) {
-      ElMessage.error(res.message ?? '启动失败')
+      ElMessage.error(res.message || '启动失败')
       return
     }
     running.value = true
@@ -138,32 +136,8 @@ async function toggleMapping() {
   }
 }
 
-async function handleExitRequest() {
-  if (exitDialogOpen.value) return
-  exitDialogOpen.value = true
-  try {
-    await ElMessageBox.confirm(
-      running.value ? '映射任务仍在运行，确认要退出吗？' : '确认退出应用？',
-      '退出确认',
-      {
-        confirmButtonText: '退出',
-        cancelButtonText: '取消',
-        type: 'warning',
-      },
-    )
-    await api()?.confirm_exit()
-  } catch {
-    // user cancelled
-  } finally {
-    exitDialogOpen.value = false
-  }
-}
-
 onMounted(async () => {
   ;(window as unknown as { __pushLog: (e: LogEntry) => void }).__pushLog = appendLog
-  ;(window as unknown as { __askExit: () => void }).__askExit = () => {
-    void handleExitRequest()
-  }
 
   const ready = await waitForBridge()
   if (!ready) {
@@ -180,9 +154,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  const w = window as unknown as { __pushLog?: unknown; __askExit?: unknown }
+  const w = window as unknown as { __pushLog?: unknown }
   delete w.__pushLog
-  delete w.__askExit
 })
 </script>
 

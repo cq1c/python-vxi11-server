@@ -73,6 +73,15 @@ def parse_visa(addr: str):
     return {'host': m.group(1), 'device': m.group(2) or 'inst0'}
 
 
+def format_exception(exc: Exception) -> str:
+    if isinstance(exc, KeyError) and exc.args:
+        return str(exc.args[0])
+    message = str(exc).strip()
+    if message:
+        return message
+    return exc.__class__.__name__
+
+
 class MappingDevice(Vxi11.InstrumentDevice):
     """Proxies VXI-11 RPCs from a local link to a real upstream instrument.
 
@@ -135,7 +144,6 @@ class JsApi:
         self._source = None
         self._target = None
         self._lock = threading.Lock()
-        self._user_confirmed_close = False
 
     def attach_window(self, window: 'webview.Window') -> None:
         self._window = window
@@ -215,9 +223,10 @@ class JsApi:
                 self.push_log('SUCCESS', f'映射已启动: {self._source} -> {self._target}')
                 return {'ok': True}
             except Exception as exc:
-                self.push_log('ERROR', f'启动失败: {exc}')
+                message = format_exception(exc)
+                self.push_log('ERROR', f'启动失败: {message}')
                 self._cleanup()
-                return {'ok': False, 'message': str(exc)}
+                return {'ok': False, 'message': f'启动失败: {message}'}
 
     def stop_mapping(self):
         with self._lock:
@@ -228,8 +237,9 @@ class JsApi:
                 self.push_log('INFO', '映射已停止')
                 return {'ok': True}
             except Exception as exc:
-                self.push_log('ERROR', f'停止失败: {exc}')
-                return {'ok': False, 'message': str(exc)}
+                message = format_exception(exc)
+                self.push_log('ERROR', f'停止失败: {message}')
+                return {'ok': False, 'message': f'停止失败: {message}'}
 
     def _cleanup(self):
         if self._server is not None:
@@ -240,7 +250,10 @@ class JsApi:
                 # in which case socketserver.shutdown() on the un-served core
                 # server would deadlock waiting on its __is_shut_down event.
                 # Tear servers down with a bounded join.
-                self.push_log('WARN', f'instrument server 收尾异常 (已忽略): {exc}')
+                self.push_log(
+                    'WARN',
+                    f'instrument server 收尾异常 (已忽略): {format_exception(exc)}',
+                )
                 for srv_attr in ('coreServer', 'abortServer'):
                     srv = getattr(self._server, srv_attr, None)
                     if srv is None:
@@ -258,42 +271,19 @@ class JsApi:
             try:
                 self._portmap.stop()
             except Exception as exc:
-                self.push_log('WARN', f'portmap stop 异常 (已忽略): {exc}')
+                self.push_log(
+                    'WARN',
+                    f'portmap stop 异常 (已忽略): {format_exception(exc)}',
+                )
             self._portmap = None
         self._running = False
         self._source = None
         self._target = None
-
-    # ---- close handshake ---------------------------------------------
-
-    def confirm_exit(self):
-        """Called by JS after the user confirms the exit dialog."""
-        if self._running:
-            self._cleanup()
-        self._user_confirmed_close = True
-        if self._window:
-            # Schedule destroy off the JS-callback thread.
-            threading.Thread(target=self._window.destroy, daemon=True).start()
-        return {'ok': True}
+        MappingDevice.target_address = None
+        MappingDevice.log_sink = None
 
 
 api = JsApi()
-
-
-def on_closing() -> bool:
-    """pywebview closing-event handler.
-
-    Returning False cancels the close. We intercept the first close request,
-    show an Element Plus confirm dialog in the page, and rely on JS to call
-    back into ``api.confirm_exit`` to actually destroy the window.
-    """
-    if api._user_confirmed_close:
-        return True
-    try:
-        api._window.evaluate_js('window.__askExit && window.__askExit()')
-    except Exception:
-        return True
-    return False
 
 
 def main():
@@ -312,10 +302,9 @@ def main():
         js_api=api,
         width=960,
         height=720,
-        confirm_close=False,
+        confirm_close=True,
     )
     api.attach_window(window)
-    window.events.closing += on_closing
 
     debug = os.environ.get('VIEW_DEBUG', '1') != '0'
     webview.start(debug=debug)

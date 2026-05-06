@@ -138,10 +138,9 @@ class DeviceItem(object):
         return
     
 class DeviceRegistry(object):
-    _next_device_index = 0
-    _registry = {}
-
     def __init__(self):
+        self._next_device_index = 0
+        self._registry = {}
         pass
     
     def register(self, name, device_class):
@@ -151,7 +150,7 @@ class DeviceRegistry(object):
             name = 'inst' +  str(self._next_device_index)
 
         if name in self._registry:
-            raise KeyError
+            raise KeyError('device "%s" already registered' % name)
 
         item = DeviceItem(device_class)
         item.lock = DeviceLock(name)
@@ -175,11 +174,20 @@ class DeviceRegistry(object):
         return device
         
 class Vxi11Server(socketserver.ThreadingMixIn, rpc.TCPServer):
-    _next_device_index = 0
-    _device_registry = DeviceRegistry()
-    _link_registry = {}
-
-    def __init__(self, host, prog, vers, port, handler_class):
+    def __init__(
+        self,
+        host,
+        prog,
+        vers,
+        port,
+        handler_class,
+        device_registry=None,
+        link_registry=None,
+    ):
+        self._device_registry = (
+            device_registry if device_registry is not None else DeviceRegistry()
+        )
+        self._link_registry = link_registry if link_registry is not None else {}
         rpc.TCPServer.__init__(self, host, prog, vers, port, handler_class)
         self.lid_gen = LockedIncrementer(200)
         return
@@ -231,8 +239,17 @@ class Vxi11Handler(rpc.RPCRequestHandler):
         return
     
 class Vxi11AbortServer(Vxi11Server):
-    def __init__(self):
-        Vxi11Server.__init__(self, '', vxi11.DEVICE_ASYNC_PROG, vxi11.DEVICE_ASYNC_VERS, 0, Vxi11AbortHandler)
+    def __init__(self, device_registry=None, link_registry=None):
+        Vxi11Server.__init__(
+            self,
+            '',
+            vxi11.DEVICE_ASYNC_PROG,
+            vxi11.DEVICE_ASYNC_VERS,
+            0,
+            Vxi11AbortHandler,
+            device_registry,
+            link_registry,
+        )
         return
     
 class Vxi11AbortHandler(Vxi11Handler):
@@ -246,8 +263,17 @@ class Vxi11AbortHandler(Vxi11Handler):
         return
     
 class Vxi11CoreServer(Vxi11Server):
-    def __init__(self, abort_port):
-        Vxi11Server.__init__(self, '', vxi11.DEVICE_CORE_PROG, vxi11.DEVICE_CORE_VERS, 0, Vxi11CoreHandler)
+    def __init__(self, abort_port, device_registry=None, link_registry=None):
+        Vxi11Server.__init__(
+            self,
+            '',
+            vxi11.DEVICE_CORE_PROG,
+            vxi11.DEVICE_CORE_VERS,
+            0,
+            Vxi11CoreHandler,
+            device_registry,
+            link_registry,
+        )
         self.abort_port = abort_port
         return
 
@@ -553,10 +579,14 @@ class InstrumentServer():
         default_device_handler: (optional) a device_handler class to be use
             as the default devive handler registered as "inst0".
         '''
-        self.abortServer = Vxi11AbortServer()
+        self._device_registry = DeviceRegistry()
+        self._link_registry = {}
+        self.abortServer = Vxi11AbortServer(self._device_registry, self._link_registry)
 
         abort_host, abort_port = self.abortServer.server_address
-        self.coreServer = Vxi11CoreServer(abort_port)
+        self.coreServer = Vxi11CoreServer(
+            abort_port, self._device_registry, self._link_registry
+        )
 
         if default_device_handler is None:
             default_device_handler = Instrument.DefaultInstrumentDevice
