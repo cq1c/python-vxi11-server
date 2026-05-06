@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { CaretRight, VideoPause, Delete } from '@element-plus/icons-vue'
@@ -23,6 +23,11 @@ interface LogEntry {
 }
 
 const VISA_RE = /^TCPIP\d*::[A-Za-z0-9_.\-]+(?:::[A-Za-z0-9_]+)?::INSTR$/i
+const STORAGE_KEYS = {
+  form: 'visa-mapping-form',
+  logs: 'visa-mapping-logs',
+} as const
+const MAX_LOGS = 1000
 
 const formRef = ref<FormInstance>()
 const form = reactive({
@@ -57,6 +62,71 @@ const buttonText = computed(() => (running.value ? '停止映射' : '开始映�
 const buttonType = computed(() => (running.value ? 'danger' : 'primary'))
 const buttonIcon = computed(() => (running.value ? VideoPause : CaretRight))
 
+function readStorageItem(key: string) {
+  try {
+    return window.localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+function writeStorageItem(key: string, value: string) {
+  try {
+    window.localStorage.setItem(key, value)
+  } catch {
+    // localStorage may be unavailable in restricted webview contexts.
+  }
+}
+
+function isLogEntry(value: unknown): value is LogEntry {
+  if (!value || typeof value !== 'object') return false
+  const entry = value as Partial<LogEntry>
+  return (
+    typeof entry.level === 'string' &&
+    typeof entry.time === 'string' &&
+    typeof entry.msg === 'string'
+  )
+}
+
+function restoreForm() {
+  const raw = readStorageItem(STORAGE_KEYS.form)
+  if (!raw) return
+  try {
+    const saved = JSON.parse(raw) as Partial<typeof form>
+    if (typeof saved.source === 'string') form.source = saved.source
+    if (typeof saved.target === 'string') form.target = saved.target
+  } catch {
+    // Ignore malformed saved state.
+  }
+}
+
+function restoreLogs() {
+  const raw = readStorageItem(STORAGE_KEYS.logs)
+  if (!raw) return
+  try {
+    const saved = JSON.parse(raw)
+    if (Array.isArray(saved)) {
+      logs.value = saved.filter(isLogEntry).slice(-MAX_LOGS)
+    }
+  } catch {
+    // Ignore malformed saved state.
+  }
+}
+
+function persistForm() {
+  writeStorageItem(
+    STORAGE_KEYS.form,
+    JSON.stringify({
+      source: form.source,
+      target: form.target,
+    }),
+  )
+}
+
+function persistLogs() {
+  writeStorageItem(STORAGE_KEYS.logs, JSON.stringify(logs.value.slice(-MAX_LOGS)))
+}
+
 const api = (): PyApi | null => {
   // pywebview injects window.pywebview.api once the bridge is ready.
   const w = window as unknown as { pywebview?: { api?: PyApi } }
@@ -88,9 +158,10 @@ function levelTagType(level: string) {
 
 function appendLog(entry: LogEntry) {
   logs.value.push(entry)
-  if (logs.value.length > 1000) {
-    logs.value.splice(0, logs.value.length - 1000)
+  if (logs.value.length > MAX_LOGS) {
+    logs.value.splice(0, logs.value.length - MAX_LOGS)
   }
+  persistLogs()
   nextTick(() => {
     if (logBox.value) {
       logBox.value.scrollTop = logBox.value.scrollHeight
@@ -100,7 +171,12 @@ function appendLog(entry: LogEntry) {
 
 function clearLogs() {
   logs.value = []
+  persistLogs()
 }
+
+restoreForm()
+restoreLogs()
+watch(form, persistForm, { deep: true })
 
 async function toggleMapping() {
   const bridge = api()
