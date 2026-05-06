@@ -35,6 +35,10 @@ clock_client.py relies on [python-vxi11](https://github.com/python-ivi/python-vx
 ### Instrument Device development
 The InstrumentDevice base class is the handler for each instrument device that resides in an instrument server and should be the base class for your instrument implementation.  The base class alone should make a fully functioning instrument that does absolutely nothing, the right way.  Only override the methods necessary to make your instrument respond to the VXI-11 requests that are important for your instrument.
 
+
+### Instrument Device development
+The InstrumentDevice base class is the handler for each instrument device that resides in an instrument server and should be the base class for your instrument implementation.  The base class alone should make a fully functioning instrument that does absolutely nothing, the right way.  Only override the methods necessary to make your instrument respond to the VXI-11 requests that are important for your instrument.
+
 See 'TCP/IP Instrument Protocol Specification' at [vxibus](http://www.vxibus.org/specifications.html) for help with the VXI-11 device_xxxx commands.
 
 For instance here is a very simple VXI-11 time server device that defines an InstrumentDevice handler and overrides just the device_read() function of the base class:

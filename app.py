@@ -12,6 +12,7 @@ import re
 import sys
 import threading
 import time
+from pathlib import Path
 
 import webview
 
@@ -71,6 +72,22 @@ def parse_visa(addr: str):
     if not m:
         return None
     return {'host': m.group(1), 'device': m.group(2) or 'inst0'}
+
+
+def default_view_url() -> str:
+    if 'VIEW_URL' in os.environ:
+        return os.environ['VIEW_URL']
+
+    base_dir = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
+    bundled_index = base_dir / 'view' / 'dist' / 'index.html'
+    if bundled_index.exists():
+        return bundled_index.resolve().as_uri()
+
+    local_index = Path(__file__).resolve().parent / 'view' / 'dist' / 'index.html'
+    if local_index.exists():
+        return local_index.resolve().as_uri()
+
+    return 'http://localhost:5173'
 
 
 def format_exception(exc: Exception) -> str:
@@ -292,9 +309,7 @@ def main():
         format='%(asctime)s %(levelname)s %(name)s: %(message)s',
     )
 
-    # Default: connect to the Vite dev server. Override with VIEW_URL=
-    # file:///path/to/dist/index.html for a built bundle.
-    url = os.environ.get('VIEW_URL', 'http://localhost:5173')
+    url = default_view_url()
 
     window = webview.create_window(
         title='VISA 设备映射工具',
