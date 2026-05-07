@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import type { FormInstance, FormRules } from 'element-plus'
 import { CaretRight, VideoPause, Delete } from '@element-plus/icons-vue'
 
 interface ApiResult {
@@ -9,12 +8,27 @@ interface ApiResult {
   message?: string
 }
 
+interface PortField {
+  enabled: boolean
+  port: number
+}
+
+interface EndpointConfig {
+  host: string
+  vxi11: boolean
+  hislip: PortField
+  socket: PortField
+}
+
 interface PyApi {
-  start_mapping: (source: string, target: string) => Promise<ApiResult>
+  start_mapping: (source: EndpointConfig, target: EndpointConfig) => Promise<ApiResult>
   stop_mapping: () => Promise<ApiResult>
-  validate_address: (addr: string) => Promise<ApiResult>
-  get_status: () => Promise<{ running: boolean; source: string | null; target: string | null }>
-  get_default_source_address: () => Promise<{ address: string; host: string }>
+  get_status: () => Promise<{
+    running: boolean
+    source: EndpointConfig | null
+    target: EndpointConfig | null
+  }>
+  get_default_endpoints: () => Promise<{ source: EndpointConfig; target: EndpointConfig }>
 }
 
 interface LogEntry {
@@ -23,40 +37,34 @@ interface LogEntry {
   msg: string
 }
 
-// Accepts VXI-11 (`...::inst0::INSTR`), HiSLIP (`...::hislip0::INSTR`)
-// and SOCKET (`...::5025::SOCKET`) resource strings.
-const VISA_RE =
-  /^TCPIP\d*::[A-Za-z0-9_.\-]+(?:::(?:[A-Za-z0-9_,\[\]:.\-]+))?::(?:INSTR|SOCKET)$/i
 const STORAGE_KEYS = {
-  form: 'visa-mapping-form',
+  // v2: structured config replaces VISA strings. Older keys are abandoned.
+  form: 'visa-mapping-form-v2',
   logs: 'visa-mapping-logs',
 } as const
 const MAX_LOGS = 1000
-const LEGACY_DEFAULT_SOURCE = 'TCPIP::127.0.0.1::inst0::INSTR'
+const HISLIP_DEFAULT_PORT = 4880
+const SOCKET_DEFAULT_PORT = 5025
 
-const formRef = ref<FormInstance>()
-const form = reactive({
-  source: 'TCPIP::0.0.0.0::inst0::INSTR',
-  target: 'TCPIP::192.168.1.10::inst0::INSTR',
+function makeDefault(host: string): EndpointConfig {
+  return {
+    host,
+    vxi11: true,
+    hislip: { enabled: true, port: HISLIP_DEFAULT_PORT },
+    socket: { enabled: true, port: SOCKET_DEFAULT_PORT },
+  }
+}
+
+const form = reactive<{ source: EndpointConfig; target: EndpointConfig }>({
+  source: makeDefault('0.0.0.0'),
+  target: makeDefault('192.168.1.10'),
 })
+
 const running = ref(false)
 const loading = ref(false)
 const logs = ref<LogEntry[]>([])
 const logBox = ref<HTMLDivElement>()
-
-const ADDRESS_HINT =
-  '格式: TCPIP::host::inst0::INSTR · TCPIP::host::hislip0::INSTR · TCPIP::host::5025::SOCKET'
-
-const rules: FormRules = {
-  source: [
-    { required: true, message: '请输入映射设备地址', trigger: 'blur' },
-    { pattern: VISA_RE, message: ADDRESS_HINT, trigger: 'blur' },
-  ],
-  target: [
-    { required: true, message: '请输入目标设备地址', trigger: 'blur' },
-    { pattern: VISA_RE, message: ADDRESS_HINT, trigger: 'blur' },
-  ],
-}
+const formError = ref('')
 
 const buttonText = computed(() => (running.value ? '停止映射' : '开始映射'))
 const buttonType = computed(() => (running.value ? 'danger' : 'primary'))
@@ -88,18 +96,35 @@ function isLogEntry(value: unknown): value is LogEntry {
   )
 }
 
+function isEndpointConfig(value: unknown): value is EndpointConfig {
+  if (!value || typeof value !== 'object') return false
+  const v = value as Partial<EndpointConfig>
+  return (
+    typeof v.host === 'string' &&
+    typeof v.vxi11 === 'boolean' &&
+    !!v.hislip &&
+    typeof v.hislip.enabled === 'boolean' &&
+    typeof v.hislip.port === 'number' &&
+    !!v.socket &&
+    typeof v.socket.enabled === 'boolean' &&
+    typeof v.socket.port === 'number'
+  )
+}
+
 function restoreForm() {
   const raw = readStorageItem(STORAGE_KEYS.form)
   if (!raw) return false
   try {
-    const saved = JSON.parse(raw) as Partial<typeof form>
-    if (typeof saved.source === 'string') form.source = saved.source
-    if (typeof saved.target === 'string') form.target = saved.target
-    return true
+    const saved = JSON.parse(raw)
+    if (saved && isEndpointConfig(saved.source) && isEndpointConfig(saved.target)) {
+      Object.assign(form.source, saved.source)
+      Object.assign(form.target, saved.target)
+      return true
+    }
   } catch {
-    // Ignore malformed saved state.
-    return false
+    // ignore malformed
   }
+  return false
 }
 
 function restoreLogs() {
@@ -111,18 +136,12 @@ function restoreLogs() {
       logs.value = saved.filter(isLogEntry).slice(-MAX_LOGS)
     }
   } catch {
-    // Ignore malformed saved state.
+    // ignore malformed saved state
   }
 }
 
 function persistForm() {
-  writeStorageItem(
-    STORAGE_KEYS.form,
-    JSON.stringify({
-      source: form.source,
-      target: form.target,
-    }),
-  )
+  writeStorageItem(STORAGE_KEYS.form, JSON.stringify({ source: form.source, target: form.target }))
 }
 
 function persistLogs() {
@@ -130,7 +149,6 @@ function persistLogs() {
 }
 
 const api = (): PyApi | null => {
-  // pywebview injects window.pywebview.api once the bridge is ready.
   const w = window as unknown as { pywebview?: { api?: PyApi } }
   return w.pywebview?.api ?? null
 }
@@ -176,7 +194,30 @@ function clearLogs() {
   persistLogs()
 }
 
-const restoredForm = restoreForm()
+function validatePort(label: string, value: unknown): string | null {
+  const n = typeof value === 'number' ? value : Number(value)
+  if (!Number.isInteger(n) || n < 1 || n > 65535) {
+    return `${label} 端口需在 1–65535 之间`
+  }
+  return null
+}
+
+function validateEndpoint(label: string, cfg: EndpointConfig): string | null {
+  if (!cfg.host || !cfg.host.trim()) return `${label}: 主机 IP 不能为空`
+  const anyEnabled = cfg.vxi11 || cfg.hislip.enabled || cfg.socket.enabled
+  if (!anyEnabled) return `${label}: 至少需要勾选一个协议`
+  if (cfg.hislip.enabled) {
+    const e = validatePort(`${label} HiSLIP`, cfg.hislip.port)
+    if (e) return e
+  }
+  if (cfg.socket.enabled) {
+    const e = validatePort(`${label} SOCKET`, cfg.socket.port)
+    if (e) return e
+  }
+  return null
+}
+
+restoreForm()
 restoreLogs()
 watch(form, persistForm, { deep: true })
 
@@ -198,8 +239,13 @@ async function toggleMapping() {
     return
   }
 
-  const valid = await formRef.value?.validate().catch(() => false)
-  if (!valid) return
+  const sourceErr = validateEndpoint('映射设备', form.source)
+  const targetErr = validateEndpoint('目标设备', form.target)
+  formError.value = sourceErr || targetErr || ''
+  if (formError.value) {
+    ElMessage.error(formError.value)
+    return
+  }
 
   loading.value = true
   try {
@@ -226,11 +272,12 @@ onMounted(async () => {
   const status = await bridge.get_status()
   if (status.running) {
     running.value = true
-    if (status.source) form.source = status.source
-    if (status.target) form.target = status.target
-  } else if (!restoredForm || form.source === LEGACY_DEFAULT_SOURCE) {
-    const source = await bridge.get_default_source_address()
-    form.source = source.address
+    if (status.source) Object.assign(form.source, status.source)
+    if (status.target) Object.assign(form.target, status.target)
+  } else if (form.source.host === '0.0.0.0') {
+    // First launch (or default-loopback host): pull a sensible local default.
+    const defaults = await bridge.get_default_endpoints()
+    Object.assign(form.source, defaults.source)
   }
 })
 
@@ -252,28 +299,117 @@ onBeforeUnmount(() => {
         </div>
       </template>
 
-      <el-form
-        ref="formRef"
-        :model="form"
-        :rules="rules"
-        label-width="120px"
-        :disabled="running || loading"
-      >
-        <el-form-item label="映射设备地址" prop="source">
-          <el-input
-            v-model="form.source"
-            placeholder="TCPIP::0.0.0.0::inst0::INSTR / hislip0::INSTR / 5025::SOCKET"
-            clearable
-          />
-        </el-form-item>
-        <el-form-item label="目标设备地址" prop="target">
-          <el-input
-            v-model="form.target"
-            placeholder="TCPIP::192.168.1.10::inst0::INSTR / hislip0::INSTR / 5025::SOCKET"
-            clearable
-          />
-        </el-form-item>
-      </el-form>
+      <div class="endpoint-grid" :class="{ disabled: running || loading }">
+        <section class="endpoint">
+          <div class="endpoint-title">映射设备 (本地)</div>
+          <div class="row">
+            <label class="row-label">主机 IP</label>
+            <el-input
+              v-model="form.source.host"
+              placeholder="0.0.0.0 或本机 IP"
+              :disabled="running || loading"
+              clearable
+            />
+          </div>
+          <div class="row">
+            <label class="row-label">支持协议</label>
+            <div class="proto-list">
+              <div class="proto-item">
+                <el-checkbox v-model="form.source.vxi11" :disabled="running || loading">
+                  VXI-11
+                </el-checkbox>
+                <span class="proto-hint">portmap 自动发现</span>
+              </div>
+              <div class="proto-item">
+                <el-checkbox v-model="form.source.hislip.enabled" :disabled="running || loading">
+                  HiSLIP
+                </el-checkbox>
+                <el-input-number
+                  v-if="form.source.hislip.enabled"
+                  v-model="form.source.hislip.port"
+                  :min="1"
+                  :max="65535"
+                  :step="1"
+                  :controls="false"
+                  :disabled="running || loading"
+                  class="port-input"
+                />
+              </div>
+              <div class="proto-item">
+                <el-checkbox v-model="form.source.socket.enabled" :disabled="running || loading">
+                  SOCKET
+                </el-checkbox>
+                <el-input-number
+                  v-if="form.source.socket.enabled"
+                  v-model="form.source.socket.port"
+                  :min="1"
+                  :max="65535"
+                  :step="1"
+                  :controls="false"
+                  :disabled="running || loading"
+                  class="port-input"
+                />
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="endpoint">
+          <div class="endpoint-title">目标设备 (远程)</div>
+          <div class="row">
+            <label class="row-label">主机 IP</label>
+            <el-input
+              v-model="form.target.host"
+              placeholder="例如 192.168.1.10"
+              :disabled="running || loading"
+              clearable
+            />
+          </div>
+          <div class="row">
+            <label class="row-label">支持协议</label>
+            <div class="proto-list">
+              <div class="proto-item">
+                <el-checkbox v-model="form.target.vxi11" :disabled="running || loading">
+                  VXI-11
+                </el-checkbox>
+                <span class="proto-hint">portmap 自动发现</span>
+              </div>
+              <div class="proto-item">
+                <el-checkbox v-model="form.target.hislip.enabled" :disabled="running || loading">
+                  HiSLIP
+                </el-checkbox>
+                <el-input-number
+                  v-if="form.target.hislip.enabled"
+                  v-model="form.target.hislip.port"
+                  :min="1"
+                  :max="65535"
+                  :step="1"
+                  :controls="false"
+                  :disabled="running || loading"
+                  class="port-input"
+                />
+              </div>
+              <div class="proto-item">
+                <el-checkbox v-model="form.target.socket.enabled" :disabled="running || loading">
+                  SOCKET
+                </el-checkbox>
+                <el-input-number
+                  v-if="form.target.socket.enabled"
+                  v-model="form.target.socket.port"
+                  :min="1"
+                  :max="65535"
+                  :step="1"
+                  :controls="false"
+                  :disabled="running || loading"
+                  class="port-input"
+                />
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div v-if="formError" class="form-error">{{ formError }}</div>
 
       <div class="actions">
         <el-button
@@ -342,9 +478,83 @@ body,
   font-weight: 600;
 }
 
+.endpoint-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+@media (max-width: 720px) {
+  .endpoint-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.endpoint {
+  border: 1px solid #e4e7ed;
+  border-radius: 8px;
+  padding: 12px 16px;
+  background: #fafafa;
+}
+
+.endpoint-title {
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: #303133;
+}
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.row:last-child {
+  margin-bottom: 0;
+}
+
+.row-label {
+  flex-shrink: 0;
+  width: 76px;
+  color: #606266;
+  font-size: 14px;
+  line-height: 32px;
+}
+
+.proto-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+}
+
+.proto-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 32px;
+}
+
+.proto-hint {
+  color: #909399;
+  font-size: 12px;
+}
+
+.port-input {
+  width: 110px;
+}
+
+.form-error {
+  color: var(--el-color-danger);
+  font-size: 13px;
+  margin-top: 8px;
+}
+
 .actions {
   display: flex;
   justify-content: flex-end;
+  margin-top: 16px;
 }
 
 .log-panel {
