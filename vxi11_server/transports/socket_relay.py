@@ -12,7 +12,14 @@ import socketserver
 import threading
 from typing import Optional
 
-from .base import AddressInfo, LogSink, RelayClient, RelaySource, TargetFactory
+from .base import (
+    AddressInfo,
+    LogSink,
+    RelayClient,
+    RelaySource,
+    TargetFactory,
+    listen_host_for_source,
+)
 
 LINE_TERMINATOR = b'\n'
 DEFAULT_READ_BUF = 4096
@@ -104,7 +111,7 @@ class SocketSourceServer(RelaySource):
         if self._server is not None:
             return
 
-        host = self.info.host if self.info.host not in ('0.0.0.0', '*') else ''
+        host = listen_host_for_source(self.info.host)
         port = self.info.port
 
         relay = self  # captured by handler

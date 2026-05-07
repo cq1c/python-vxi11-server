@@ -14,7 +14,14 @@ from .. import vxi11 as _vxi11
 from ..instrument_device import InstrumentDevice, ReadRespReason
 from ..instrument_server import Error, InstrumentServer
 from ..portmap_server import PortMapServer
-from .base import AddressInfo, LogSink, RelayClient, RelaySource, TargetFactory
+from .base import (
+    AddressInfo,
+    LogSink,
+    RelayClient,
+    RelaySource,
+    TargetFactory,
+    listen_host_for_source,
+)
 
 
 class Vxi11TargetClient(RelayClient):
@@ -75,12 +82,16 @@ class Vxi11SourceServer(RelaySource):
         device_name = (self.info.device or 'inst0')
         device_cls = _build_relay_device(self.target_factory, self.log)
 
-        self._portmap = PortMapServer()
+        portmap_host = listen_host_for_source(self.info.host)
+        self._portmap = PortMapServer(host=portmap_host)
         try:
             self._portmap.start()
         except OSError as exc:
             self._portmap = None
             self.log('WARN', f'本地 portmap 端口被占用 (已使用系统已有的): {exc}')
+        else:
+            display_host = portmap_host or '0.0.0.0'
+            self.log('INFO', f'portmap listening on {display_host}:111')
 
         if device_name.lower() == 'inst0':
             self._server = InstrumentServer(default_device_handler=device_cls)

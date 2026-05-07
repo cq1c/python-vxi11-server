@@ -35,6 +35,7 @@ from .base import (
     RelayClient,
     RelaySource,
     TargetFactory,
+    listen_host_for_source,
 )
 
 
@@ -549,7 +550,7 @@ class HislipSourceServer(RelaySource):
     def start(self) -> None:
         if self._server is not None:
             return
-        host = self.info.host if self.info.host not in ('0.0.0.0', '*') else ''
+        host = listen_host_for_source(self.info.host)
         port = self.info.port or HISLIP_DEFAULT_PORT
 
         relay = self

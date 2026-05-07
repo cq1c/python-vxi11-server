@@ -103,6 +103,20 @@ def _silent_log(_level: str, _msg: str) -> None:
     pass
 
 
+def listen_host_for_source(source_host: str) -> str:
+    """Return the local bind host for a source VISA address.
+
+    The host in a VISA resource is the address clients use to reach this
+    relay. For LAN/public/NAT addresses, bind all IPv4 interfaces because the
+    address may not be assigned to the local machine. Keep explicit loopback
+    mappings private.
+    """
+    host = (source_host or '').strip().lower()
+    if host == 'localhost' or host.startswith('127.'):
+        return '127.0.0.1'
+    return ''
+
+
 class RelayClient(ABC):
     """A connection to the upstream real instrument.
 
