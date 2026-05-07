@@ -23,7 +23,10 @@ interface LogEntry {
   msg: string
 }
 
-const VISA_RE = /^TCPIP\d*::[A-Za-z0-9_.\-]+(?:::[A-Za-z0-9_]+)?::INSTR$/i
+// Accepts VXI-11 (`...::inst0::INSTR`), HiSLIP (`...::hislip0::INSTR`)
+// and SOCKET (`...::5025::SOCKET`) resource strings.
+const VISA_RE =
+  /^TCPIP\d*::[A-Za-z0-9_.\-]+(?:::(?:[A-Za-z0-9_,\[\]:.\-]+))?::(?:INSTR|SOCKET)$/i
 const STORAGE_KEYS = {
   form: 'visa-mapping-form',
   logs: 'visa-mapping-logs',
@@ -41,22 +44,17 @@ const loading = ref(false)
 const logs = ref<LogEntry[]>([])
 const logBox = ref<HTMLDivElement>()
 
+const ADDRESS_HINT =
+  '格式: TCPIP::host::inst0::INSTR · TCPIP::host::hislip0::INSTR · TCPIP::host::5025::SOCKET'
+
 const rules: FormRules = {
   source: [
     { required: true, message: '请输入映射设备地址', trigger: 'blur' },
-    {
-      pattern: VISA_RE,
-      message: '格式: TCPIP[board]::host[::device]::INSTR',
-      trigger: 'blur',
-    },
+    { pattern: VISA_RE, message: ADDRESS_HINT, trigger: 'blur' },
   ],
   target: [
     { required: true, message: '请输入目标设备地址', trigger: 'blur' },
-    {
-      pattern: VISA_RE,
-      message: '格式: TCPIP[board]::host[::device]::INSTR',
-      trigger: 'blur',
-    },
+    { pattern: VISA_RE, message: ADDRESS_HINT, trigger: 'blur' },
   ],
 }
 
@@ -264,14 +262,14 @@ onBeforeUnmount(() => {
         <el-form-item label="映射设备地址" prop="source">
           <el-input
             v-model="form.source"
-            placeholder="TCPIP::0.0.0.0::inst0::INSTR"
+            placeholder="TCPIP::0.0.0.0::inst0::INSTR / hislip0::INSTR / 5025::SOCKET"
             clearable
           />
         </el-form-item>
         <el-form-item label="目标设备地址" prop="target">
           <el-input
             v-model="form.target"
-            placeholder="TCPIP::192.168.1.10::inst0::INSTR"
+            placeholder="TCPIP::192.168.1.10::inst0::INSTR / hislip0::INSTR / 5025::SOCKET"
             clearable
           />
         </el-form-item>

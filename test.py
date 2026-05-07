@@ -20,7 +20,7 @@ def main():
     #   GPIB:   'GPIB0::5::INSTR'
     #   TCP/IP: 'TCPIP0::192.168.1.100::INSTR'
     
-    instrument_address = resources[3]
+    instrument_address = resources[-1]
     instrument= None
     try:
         instrument = rm.open_resource(instrument_address)

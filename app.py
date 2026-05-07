@@ -3,12 +3,17 @@
 Frontend (Element Plus) is loaded into a pywebview window. The Python side
 exposes a JsApi class via pywebview's `js_api`, while log messages are
 pushed to the page through `window.evaluate_js`.
+
+Supports three VISA transports for both source and target:
+
+* VXI-11   ``TCPIP[N]::host[::deviceName]::INSTR``
+* HiSLIP   ``TCPIP[N]::host::hislipN[,port]::INSTR``
+* SOCKET   ``TCPIP[N]::host::PORT::SOCKET``
 """
 
 import json
 import logging
 import os
-import re
 import socket
 import sys
 import threading
@@ -19,10 +24,14 @@ import webview
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import vxi11_server as Vxi11
 from vxi11_server import rpc as vxi11_rpc
-from vxi11_server import vxi11 as vxi11_proto
-from vxi11_server.portmap_server import PortMapServer
+from vxi11_server.transports import (
+    AddressInfo,
+    Transport,
+    make_source,
+    make_target,
+    parse_address,
+)
 
 
 def _local_host(host: str) -> str:
@@ -59,20 +68,6 @@ def _patched_unregister(self):
 
 vxi11_rpc.TCPServer.register_pmap = _patched_register_pmap
 vxi11_rpc.TCPServer.unregister = _patched_unregister
-
-
-# TCPIP[board]::host[::device]::INSTR  (case-insensitive, ignore surrounding whitespace)
-VISA_RE = re.compile(
-    r'^TCPIP\d*::([A-Za-z0-9_.\-]+)(?:::([A-Za-z0-9_]+))?::INSTR$',
-    re.IGNORECASE,
-)
-
-
-def parse_visa(addr: str):
-    m = VISA_RE.match(addr.strip())
-    if not m:
-        return None
-    return {'host': m.group(1), 'device': m.group(2) or 'inst0'}
 
 
 def default_view_url() -> str:
@@ -126,55 +121,8 @@ def format_exception(exc: Exception) -> str:
     return exc.__class__.__name__
 
 
-class MappingDevice(Vxi11.InstrumentDevice):
-    """Proxies VXI-11 RPCs from a local link to a real upstream instrument.
-
-    Configuration is set on the class before the server is started, because
-    the framework instantiates one device per client link via a no-arg-style
-    factory (``device_class(name, lock)``).
-    """
-
-    target_address = None
-    log_sink = None
-
-    def device_init(self):
-        self._client = None
-        try:
-            self._client = vxi11_proto.Instrument(self.target_address)
-            self._client.open()
-            self._log('INFO', f'链接已建立 -> {self.target_address}')
-        except Exception as exc:
-            self._log('ERROR', f'连接目标设备失败: {exc}')
-            self._client = None
-
-    def _log(self, level, msg):
-        sink = MappingDevice.log_sink
-        if sink:
-            sink(level, msg)
-
-    def device_write(self, opaque_data, flags, io_timeout):
-        if self._client is None:
-            return Vxi11.Error.IO_ERROR
-        try:
-            self._client.write_raw(opaque_data)
-            preview = opaque_data.decode('ascii', errors='replace').strip()
-            self._log('INFO', f'>>> {preview}')
-            return Vxi11.Error.NO_ERROR
-        except Exception as exc:
-            self._log('ERROR', f'write 失败: {exc}')
-            return Vxi11.Error.IO_ERROR
-
-    def device_read(self, request_size, term_char, flags, io_timeout):
-        if self._client is None:
-            return Vxi11.Error.IO_ERROR, Vxi11.ReadRespReason.END, b''
-        try:
-            data = self._client.read_raw(request_size)
-            preview = data.decode('ascii', errors='replace').strip()
-            self._log('INFO', f'<<< {preview}')
-            return Vxi11.Error.NO_ERROR, Vxi11.ReadRespReason.END, data
-        except Exception as exc:
-            self._log('ERROR', f'read 失败: {exc}')
-            return Vxi11.Error.IO_ERROR, Vxi11.ReadRespReason.END, b''
+def _transport_label(t: Transport) -> str:
+    return {Transport.VXI11: 'VXI-11', Transport.HISLIP: 'HiSLIP', Transport.SOCKET: 'SOCKET'}[t]
 
 
 class JsApi:
@@ -182,11 +130,10 @@ class JsApi:
 
     def __init__(self):
         self._window = None
-        self._server = None
-        self._portmap = None
+        self._source = None  # RelaySource
         self._running = False
-        self._source = None
-        self._target = None
+        self._source_addr = None
+        self._target_addr = None
         self._lock = threading.Lock()
 
     def attach_window(self, window: 'webview.Window') -> None:
@@ -212,18 +159,18 @@ class JsApi:
     def validate_address(self, addr: str):
         if not addr or not addr.strip():
             return {'ok': False, 'message': '地址不能为空'}
-        if parse_visa(addr) is None:
+        if parse_address(addr) is None:
             return {
                 'ok': False,
-                'message': '格式应为 TCPIP[board]::host[::device]::INSTR',
+                'message': '格式应为 TCPIP::host::inst0::INSTR / hislip0::INSTR / PORT::SOCKET',
             }
         return {'ok': True}
 
     def get_status(self):
         return {
             'running': self._running,
-            'source': self._source,
-            'target': self._target,
+            'source': self._source_addr,
+            'target': self._target_addr,
         }
 
     def get_default_source_address(self):
@@ -242,35 +189,24 @@ class JsApi:
                 if not v['ok']:
                     return {'ok': False, 'message': f'{label}: {v["message"]}'}
 
-            src = parse_visa(source_addr)
+            source_info = parse_address(source_addr)
+            target_info = parse_address(target_addr)
+            assert source_info is not None and target_info is not None
+
             try:
-                MappingDevice.target_address = target_addr.strip()
-                MappingDevice.log_sink = self.push_log
-
-                self._portmap = PortMapServer()
-                try:
-                    self._portmap.start()
-                except OSError as exc:
-                    self._portmap = None
-                    self.push_log(
-                        'WARN',
-                        f'本地 portmap 端口被占用 (已使用系统已有的): {exc}',
-                    )
-
-                # InstrumentServer always registers a default 'inst0'. If the
-                # user's source device is 'inst0', override that default;
-                # otherwise add the mapping device as an extra handler.
-                if src['device'].lower() == 'inst0':
-                    self._server = Vxi11.InstrumentServer(default_device_handler=MappingDevice)
-                else:
-                    self._server = Vxi11.InstrumentServer()
-                    self._server.add_device_handler(MappingDevice, src['device'])
-                self._server.listen()
+                target_factory = lambda info=target_info: make_target(info)
+                self._source = make_source(source_info, target_factory, self.push_log)
+                self._source.start()
 
                 self._running = True
-                self._source = source_addr.strip()
-                self._target = target_addr.strip()
-                self.push_log('SUCCESS', f'映射已启动: {self._source} -> {self._target}')
+                self._source_addr = source_info.raw
+                self._target_addr = target_info.raw
+                self.push_log(
+                    'SUCCESS',
+                    f'映射已启动 [{_transport_label(source_info.transport)} → '
+                    f'{_transport_label(target_info.transport)}]: '
+                    f'{self._source_addr} -> {self._target_addr}',
+                )
                 return {'ok': True}
             except Exception as exc:
                 message = format_exception(exc)
@@ -292,45 +228,18 @@ class JsApi:
                 return {'ok': False, 'message': f'停止失败: {message}'}
 
     def _cleanup(self):
-        if self._server is not None:
+        if self._source is not None:
             try:
-                self._server.close()
-            except Exception as exc:
-                # listen() can fail partway (abort thread started, core not),
-                # in which case socketserver.shutdown() on the un-served core
-                # server would deadlock waiting on its __is_shut_down event.
-                # Tear servers down with a bounded join.
-                self.push_log(
-                    'WARN',
-                    f'instrument server 收尾异常 (已忽略): {format_exception(exc)}',
-                )
-                for srv_attr in ('coreServer', 'abortServer'):
-                    srv = getattr(self._server, srv_attr, None)
-                    if srv is None:
-                        continue
-                    t = threading.Thread(target=srv.shutdown, daemon=True)
-                    t.start()
-                    t.join(timeout=1.5)
-                    try:
-                        srv.server_close()
-                    except Exception:
-                        pass
-            finally:
-                self._server = None
-        if self._portmap is not None:
-            try:
-                self._portmap.stop()
+                self._source.stop()
             except Exception as exc:
                 self.push_log(
                     'WARN',
-                    f'portmap stop 异常 (已忽略): {format_exception(exc)}',
+                    f'source 收尾异常 (已忽略): {format_exception(exc)}',
                 )
-            self._portmap = None
+            self._source = None
         self._running = False
-        self._source = None
-        self._target = None
-        MappingDevice.target_address = None
-        MappingDevice.log_sink = None
+        self._source_addr = None
+        self._target_addr = None
 
 
 api = JsApi()
