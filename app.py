@@ -15,8 +15,10 @@ VXI-11/SOCKET and upgrades to HiSLIP keeps working.
 import json
 import logging
 import os
+import pickle
 import socket
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -138,6 +140,30 @@ _TRANSPORT_LABELS = {
 _TARGET_FALLBACK_ORDER = (Transport.HISLIP, Transport.VXI11, Transport.SOCKET)
 
 
+_LOG_PRIORITY = {
+    'DEBUG': 10,
+    'INFO': 20,
+    'SUCCESS': 20,
+    'WARN': 30,
+    'WARNING': 30,
+    'ERROR': 40,
+}
+_DEFAULT_LOG_LEVEL = 'INFO'
+
+# A fixed subdir under the OS temp dir. tempfile.gettempdir() returns a
+# stable location across launches (/tmp on Linux, %TEMP% on Windows), so
+# data saved here survives restarts. Intentionally NOT sys._MEIPASS,
+# which is a fresh per-launch pyinstaller scratch dir.
+_STATE_DIR_NAME = 'visa-mapping-tool'
+_STATE_FILE_NAME = 'last_inputs.pkl'
+
+
+def _state_file_path() -> Path:
+    base = Path(tempfile.gettempdir()) / _STATE_DIR_NAME
+    base.mkdir(parents=True, exist_ok=True)
+    return base / _STATE_FILE_NAME
+
+
 def _validate_port(label: str, value) -> int:
     try:
         port = int(value)
@@ -216,14 +242,45 @@ class JsApi:
         self._source_config: dict | None = None
         self._target_config: dict | None = None
         self._lock = threading.Lock()
+        self._log_level = _DEFAULT_LOG_LEVEL
+        self._persisted: dict = self._load_persisted()
 
     def attach_window(self, window: 'webview.Window') -> None:
         self._window = window
+
+    # ---- pickle persistence ------------------------------------------
+
+    def _load_persisted(self) -> dict:
+        try:
+            with _state_file_path().open('rb') as f:
+                data = pickle.load(f)
+        except (FileNotFoundError, EOFError, pickle.UnpicklingError, OSError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        level = data.get('log_level')
+        if isinstance(level, str) and level.upper() in _LOG_PRIORITY:
+            self._log_level = level.upper()
+        return data
+
+    def _save_persisted(self) -> None:
+        data = {
+            'source': self._persisted.get('source'),
+            'target': self._persisted.get('target'),
+            'log_level': self._log_level,
+        }
+        try:
+            with _state_file_path().open('wb') as f:
+                pickle.dump(data, f)
+        except OSError:
+            pass
 
     # ---- log push -----------------------------------------------------
 
     def push_log(self, level: str, msg: str) -> None:
         if not self._window:
+            return
+        if _LOG_PRIORITY.get(level.upper(), 0) < _LOG_PRIORITY.get(self._log_level, 0):
             return
         payload = json.dumps({
             'level': level,
@@ -235,6 +292,14 @@ class JsApi:
         except Exception:
             pass
 
+    def set_log_level(self, level: str):
+        level_up = level.upper() if isinstance(level, str) else ''
+        if level_up not in _LOG_PRIORITY:
+            return {'ok': False, 'message': f'未知日志等级: {level}'}
+        self._log_level = level_up
+        self._save_persisted()
+        return {'ok': True, 'level': level_up}
+
     # ---- public js api ------------------------------------------------
 
     def get_status(self):
@@ -242,6 +307,14 @@ class JsApi:
             'running': self._running,
             'source': self._source_config,
             'target': self._target_config,
+            'log_level': self._log_level,
+        }
+
+    def get_persisted_state(self):
+        return {
+            'source': self._persisted.get('source'),
+            'target': self._persisted.get('target'),
+            'log_level': self._log_level,
         }
 
     def get_default_endpoints(self):
@@ -261,6 +334,10 @@ class JsApi:
                 target_addrs = _build_endpoint_addresses('目标设备', target)
             except ValueError as exc:
                 return {'ok': False, 'message': str(exc)}
+
+            self._persisted['source'] = source
+            self._persisted['target'] = target
+            self._save_persisted()
 
             target_by_proto = {a.transport: a for a in target_addrs}
 

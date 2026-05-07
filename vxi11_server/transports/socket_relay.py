@@ -263,7 +263,7 @@ class SocketSourceServer(RelaySource):
         text = line.rstrip(b'\r\n').decode('ascii', errors='replace')
         try:
             client.write_raw(line)
-            self.log('INFO', f'>>> {text}')
+            self.log('DEBUG', f'>>> {text}')
         except Exception as exc:
             self.log('ERROR', f'write 失败: {exc}')
             return
@@ -281,7 +281,7 @@ class SocketSourceServer(RelaySource):
         try:
             sock.sendall(response)
             preview = response.rstrip(b'\r\n').decode('ascii', errors='replace')
-            self.log('INFO', f'<<< {preview}')
+            self.log('DEBUG', f'<<< {preview}')
         except OSError as exc:
             self.log('ERROR', f'回写客户端失败: {exc}')
 

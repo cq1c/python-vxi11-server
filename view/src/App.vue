@@ -20,6 +20,8 @@ interface EndpointConfig {
   socket: PortField
 }
 
+type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR'
+
 interface PyApi {
   start_mapping: (source: EndpointConfig, target: EndpointConfig) => Promise<ApiResult>
   stop_mapping: () => Promise<ApiResult>
@@ -27,8 +29,15 @@ interface PyApi {
     running: boolean
     source: EndpointConfig | null
     target: EndpointConfig | null
+    log_level?: LogLevel
   }>
   get_default_endpoints: () => Promise<{ source: EndpointConfig; target: EndpointConfig }>
+  get_persisted_state: () => Promise<{
+    source: EndpointConfig | null
+    target: EndpointConfig | null
+    log_level: LogLevel
+  }>
+  set_log_level: (level: LogLevel) => Promise<ApiResult & { level?: LogLevel }>
 }
 
 interface LogEntry {
@@ -65,6 +74,30 @@ const loading = ref(false)
 const logs = ref<LogEntry[]>([])
 const logBox = ref<HTMLDivElement>()
 const formError = ref('')
+const logLevel = ref<LogLevel>('INFO')
+
+const LOG_LEVEL_OPTIONS: { value: LogLevel; label: string }[] = [
+  { value: 'DEBUG', label: 'DEBUG' },
+  { value: 'INFO', label: 'INFO' },
+  { value: 'WARN', label: 'WARN' },
+  { value: 'ERROR', label: 'ERROR' },
+]
+
+const LOG_LEVEL_PRIORITY: Record<string, number> = {
+  DEBUG: 10,
+  INFO: 20,
+  SUCCESS: 20,
+  WARN: 30,
+  WARNING: 30,
+  ERROR: 40,
+}
+
+const visibleLogs = computed(() => {
+  const threshold = LOG_LEVEL_PRIORITY[logLevel.value] ?? 20
+  return logs.value.filter(
+    (entry) => (LOG_LEVEL_PRIORITY[entry.level.toUpperCase()] ?? 20) >= threshold,
+  )
+})
 
 const buttonText = computed(() => (running.value ? '停止映射' : '开始映射'))
 const buttonType = computed(() => (running.value ? 'danger' : 'primary'))
@@ -221,6 +254,17 @@ restoreForm()
 restoreLogs()
 watch(form, persistForm, { deep: true })
 
+async function onLogLevelChange(level: LogLevel) {
+  logLevel.value = level
+  const bridge = api()
+  if (!bridge) return
+  try {
+    await bridge.set_log_level(level)
+  } catch {
+    // bridge errors are non-fatal — frontend filter still applies
+  }
+}
+
 async function toggleMapping() {
   const bridge = api()
   if (!bridge) {
@@ -270,14 +314,30 @@ onMounted(async () => {
   }
   const bridge = api()!
   const status = await bridge.get_status()
+  if (status.log_level) {
+    logLevel.value = status.log_level
+  }
   if (status.running) {
     running.value = true
     if (status.source) Object.assign(form.source, status.source)
     if (status.target) Object.assign(form.target, status.target)
+    return
+  }
+
+  // Pickle in the OS temp dir is the source of truth for last-applied
+  // inputs. Fall back to /get_default_endpoints when nothing is saved.
+  const persisted = await bridge.get_persisted_state()
+  if (persisted.log_level) {
+    logLevel.value = persisted.log_level
+  }
+  if (persisted.source && isEndpointConfig(persisted.source)) {
+    Object.assign(form.source, persisted.source)
   } else if (form.source.host === '0.0.0.0') {
-    // First launch (or default-loopback host): pull a sensible local default.
     const defaults = await bridge.get_default_endpoints()
     Object.assign(form.source, defaults.source)
+  }
+  if (persisted.target && isEndpointConfig(persisted.target)) {
+    Object.assign(form.target, persisted.target)
   }
 })
 
@@ -428,13 +488,28 @@ onBeforeUnmount(() => {
       <template #header>
         <div class="panel-header">
           <span>实时日志</span>
-          <el-button :icon="Delete" link @click="clearLogs">清空</el-button>
+          <div class="log-actions">
+            <el-select
+              :model-value="logLevel"
+              size="small"
+              class="log-level-select"
+              @update:model-value="(v: LogLevel) => onLogLevelChange(v)"
+            >
+              <el-option
+                v-for="opt in LOG_LEVEL_OPTIONS"
+                :key="opt.value"
+                :label="opt.label"
+                :value="opt.value"
+              />
+            </el-select>
+            <el-button :icon="Delete" link @click="clearLogs">清空</el-button>
+          </div>
         </div>
       </template>
 
       <div ref="logBox" class="log-box">
-        <div v-if="!logs.length" class="log-empty">暂无日志</div>
-        <div v-for="(entry, idx) in logs" :key="idx" class="log-line">
+        <div v-if="!visibleLogs.length" class="log-empty">暂无日志</div>
+        <div v-for="(entry, idx) in visibleLogs" :key="idx" class="log-line">
           <span class="log-time">{{ entry.time }}</span>
           <el-tag :type="levelTagType(entry.level)" size="small" disable-transitions>
             {{ entry.level }}
@@ -580,6 +655,16 @@ body,
   font-size: 13px;
   line-height: 1.6;
   border-radius: 0 0 8px 8px;
+}
+
+.log-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.log-level-select {
+  width: 110px;
 }
 
 .log-empty {

@@ -462,7 +462,7 @@ class _HislipSession:
         preview = message.decode('ascii', errors='replace').strip()
         try:
             self.client.write_raw(message)
-            self.log('INFO', f'>>> {preview}')
+            self.log('DEBUG', f'>>> {preview}')
         except Exception as exc:
             self.log('ERROR', f'write 失败: {exc}')
             self._send_error(reason=2, text=str(exc))
@@ -495,7 +495,7 @@ class _HislipSession:
             if total == 0:
                 self.sync_sock.sendall(pack_header(MSG_DATA_END))
         preview = response.decode('ascii', errors='replace').strip()
-        self.log('INFO', f'<<< {preview}')
+        self.log('DEBUG', f'<<< {preview}')
 
     def _send_error(self, reason: int, text: str) -> None:
         try:

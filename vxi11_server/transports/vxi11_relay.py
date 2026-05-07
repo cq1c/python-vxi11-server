@@ -195,7 +195,7 @@ def _build_relay_device(target_factory: TargetFactory, log: LogSink):
             try:
                 self._client.write_raw(opaque_data)
                 preview = opaque_data.decode('ascii', errors='replace').strip()
-                self._log('INFO', f'>>> {preview}')
+                self._log('DEBUG', f'>>> {preview}')
                 return Error.NO_ERROR
             except Exception as exc:
                 self._log('ERROR', f'write 失败: {exc}')
@@ -208,7 +208,7 @@ def _build_relay_device(target_factory: TargetFactory, log: LogSink):
                 data = self._client.read_raw(request_size)
                 reason = _read_reason(self._client, data, request_size)
                 preview = data.decode('ascii', errors='replace').strip()
-                self._log('INFO', f'<<< {preview}')
+                self._log('DEBUG', f'<<< {preview}')
                 return Error.NO_ERROR, reason, data
             except Exception as exc:
                 self._log('ERROR', f'read 失败: {exc}')
