@@ -24,12 +24,22 @@ from .base import (
 )
 
 
+def _read_reason(client: RelayClient, data: bytes, request_size: int) -> int:
+    pending = getattr(client, 'has_pending_read_data', None)
+    if callable(pending):
+        return ReadRespReason.REQCNT if pending() else ReadRespReason.END
+    if request_size > 0 and len(data) >= request_size:
+        return ReadRespReason.REQCNT
+    return ReadRespReason.END
+
+
 class Vxi11TargetClient(RelayClient):
     """Forwards writes/reads to an upstream VXI-11 instrument."""
 
     def __init__(self, info: AddressInfo) -> None:
         self.info = info
         self._instr: Optional[_vxi11.Instrument] = None
+        self._last_read_reason = _vxi11.RX_END
 
     def open(self) -> None:
         if self._instr is not None:
@@ -55,7 +65,34 @@ class Vxi11TargetClient(RelayClient):
         if self._instr is None:
             self.open()
         assert self._instr is not None
-        return self._instr.read_raw(max_size)
+        if not max_size or max_size <= 0:
+            self._last_read_reason = _vxi11.RX_END
+            return self._instr.read_raw(max_size)
+
+        if self._instr.link is None:
+            self._instr.open()
+
+        flags = 0
+        term_char = 0
+        if self._instr.term_char is not None:
+            flags = _vxi11.OP_FLAG_TERMCHAR_SET
+            term_char = str(self._instr.term_char).encode('ascii')[0]
+
+        error, reason, data = self._instr.client.device_read(
+            self._instr.link,
+            max_size,
+            self._instr._timeout_ms,
+            self._instr._lock_timeout_ms,
+            flags,
+            term_char,
+        )
+        if error:
+            raise _vxi11.Vxi11Exception(error, 'read')
+        self._last_read_reason = reason
+        return data
+
+    def has_pending_read_data(self) -> bool:
+        return self._last_read_reason & (_vxi11.RX_END | _vxi11.RX_CHR) == 0
 
 
 class Vxi11SourceServer(RelaySource):
@@ -169,9 +206,10 @@ def _build_relay_device(target_factory: TargetFactory, log: LogSink):
                 return Error.IO_ERROR, ReadRespReason.END, b''
             try:
                 data = self._client.read_raw(request_size)
+                reason = _read_reason(self._client, data, request_size)
                 preview = data.decode('ascii', errors='replace').strip()
                 self._log('INFO', f'<<< {preview}')
-                return Error.NO_ERROR, ReadRespReason.END, data
+                return Error.NO_ERROR, reason, data
             except Exception as exc:
                 self._log('ERROR', f'read 失败: {exc}')
                 return Error.IO_ERROR, ReadRespReason.END, b''

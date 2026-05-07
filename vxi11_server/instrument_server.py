@@ -32,7 +32,7 @@ from contextlib import contextmanager
 
 from . import instrument_device as Instrument
 
-MAX_RECEIVE_SIZE = 1024
+MAX_RECEIVE_SIZE = 64 * 1024
 
 logger = logging.getLogger(__name__)
 
