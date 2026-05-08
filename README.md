@@ -99,3 +99,13 @@ To access the time server using python-vxi11 as the client library:
 ### Todo
   * move responsibility for packet segmentation from the application to the library
   * add abort example to explore/verify functionality
+
+## AI 协作指南
+本项目使用 [AGENTS.md](./AGENTS.md) 标准为 AI 编码助手提供上下文。
+
+阅读顺序：
+1. `AGENTS.md` — 项目约束与命令
+2. `LOOPS.md` — 业务逻辑环（修改业务前必读）
+3. `.docs-init/findings.md` — 带行号的原始证据库
+
+如需兼容 Claude Code 等工具，可运行 `bash setup_agent_links.sh` 创建软链接。
