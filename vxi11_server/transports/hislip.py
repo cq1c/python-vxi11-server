@@ -374,15 +374,21 @@ class _HislipSession:
         self.sync_sock.settimeout(None)
 
         buf = bytearray()
+        request_message_id: Optional[int] = None
         try:
             while not self._closed:
-                msg_type, _ctrl, _mparam, payload = read_message(self.sync_sock)
+                msg_type, _ctrl, mparam, payload = read_message(self.sync_sock)
                 if msg_type == MSG_DATA:
+                    if request_message_id is None:
+                        request_message_id = mparam
                     buf.extend(payload)
                 elif msg_type == MSG_DATA_END:
+                    if request_message_id is None or mparam != 0:
+                        request_message_id = mparam
                     buf.extend(payload)
-                    self._handle_request(bytes(buf))
+                    self._handle_request(bytes(buf), request_message_id or 0)
                     buf.clear()
+                    request_message_id = None
                 elif msg_type == MSG_TRIGGER:
                     self.log('INFO', 'HiSLIP: TRIGGER 已忽略')
                 elif msg_type in (MSG_FATAL_ERROR, MSG_ERROR):
@@ -456,7 +462,7 @@ class _HislipSession:
 
     # -- relay helpers --
 
-    def _handle_request(self, message: bytes) -> None:
+    def _handle_request(self, message: bytes, message_id: int = 0) -> None:
         if self.client is None:
             return
         preview = message.decode('ascii', errors='replace').strip()
@@ -477,9 +483,9 @@ class _HislipSession:
             self.log('ERROR', f'read 失败: {exc}')
             self._send_error(reason=3, text=str(exc))
             return
-        self._send_data(response)
+        self._send_data(response, message_id)
 
-    def _send_data(self, response: bytes) -> None:
+    def _send_data(self, response: bytes, message_id: int = 0) -> None:
         chunk_size = max(self.max_message_size - HEADER_SIZE, 1024)
         with self._lock:
             offset = 0
@@ -489,11 +495,17 @@ class _HislipSession:
                 last = end >= total
                 msg_type = MSG_DATA_END if last else MSG_DATA
                 self.sync_sock.sendall(
-                    pack_header(msg_type, message_parameter=0, payload=response[offset:end])
+                    pack_header(
+                        msg_type,
+                        message_parameter=message_id,
+                        payload=response[offset:end],
+                    )
                 )
                 offset = end
             if total == 0:
-                self.sync_sock.sendall(pack_header(MSG_DATA_END))
+                self.sync_sock.sendall(
+                    pack_header(MSG_DATA_END, message_parameter=message_id)
+                )
         preview = response.decode('ascii', errors='replace').strip()
         self.log('DEBUG', f'<<< {preview}')
 
