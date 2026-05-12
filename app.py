@@ -7,9 +7,8 @@ pushed to the page through `window.evaluate_js`.
 The UI takes a host IP per side plus a set of protocol checkboxes
 (VXI-11 / HiSLIP / SOCKET). Each enabled source protocol gets its own
 RelaySource; incoming connections are forwarded to the same protocol on
-the target if available, otherwise we fall back to the most feature-rich
-enabled one (HiSLIP > VXI-11 > SOCKET) so a client that probes via
-VXI-11/SOCKET and upgrades to HiSLIP keeps working.
+the target if available, with per-session fallback to the most feature-rich
+enabled one (HiSLIP > VXI-11 > SOCKET) when that endpoint is unavailable.
 """
 
 import json
@@ -30,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from vxi11_server import rpc as vxi11_rpc
 from vxi11_server.transports import (
     AddressInfo,
+    RelayClient,
     Transport,
     make_source,
     make_target,
@@ -215,21 +215,123 @@ def _build_endpoint_addresses(label: str, cfg: dict) -> list[AddressInfo]:
     return addrs
 
 
+def _target_route(
+    target_by_proto: dict,
+    src_proto: Transport,
+) -> list[AddressInfo]:
+    """Build target attempts for an incoming source protocol.
+
+    Same-protocol passthrough wins. If that endpoint cannot be used for a
+    session, the routed client falls back HiSLIP > VXI-11 > SOCKET.
+    """
+    route: list[AddressInfo] = []
+    seen: set[Transport] = set()
+
+    def add(proto: Transport) -> None:
+        if proto in seen:
+            return
+        addr = target_by_proto.get(proto)
+        if addr is None:
+            return
+        route.append(addr)
+        seen.add(proto)
+
+    add(src_proto)
+    for proto in _TARGET_FALLBACK_ORDER:
+        add(proto)
+
+    if not route:
+        raise ValueError('目标未启用任何协议')
+    return route
+
+
+def _format_target_route(route: list[AddressInfo]) -> str:
+    return ' / '.join(
+        f'{_TRANSPORT_LABELS[addr.transport]} {addr.raw}' for addr in route
+    )
+
+
+class _RoutedTargetClient(RelayClient):
+    """Session-local target client with same-protocol preference + fallback."""
+
+    def __init__(self, route: list[AddressInfo], log) -> None:
+        self._route = tuple(route)
+        self._log = log
+        self._client: RelayClient | None = None
+        self._active: AddressInfo | None = None
+
+    def open(self) -> None:
+        if self._client is not None:
+            return
+
+        errors: list[str] = []
+        for index, addr in enumerate(self._route):
+            client = make_target(addr)
+            try:
+                client.open()
+            except Exception as exc:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                message = format_exception(exc)
+                errors.append(f'{_TRANSPORT_LABELS[addr.transport]} {addr.raw}: {message}')
+                if index + 1 < len(self._route):
+                    self._log(
+                        'WARN',
+                        f'目标 {_TRANSPORT_LABELS[addr.transport]} 连接失败，尝试下一个协议: {message}',
+                    )
+                continue
+
+            self._client = client
+            self._active = addr
+            if index > 0:
+                self._log(
+                    'INFO',
+                    f'目标协议已切换为 {_TRANSPORT_LABELS[addr.transport]} {addr.raw}',
+                )
+            return
+
+        detail = '; '.join(errors) if errors else '未配置目标协议'
+        raise ConnectionError(f'目标协议均连接失败: {detail}')
+
+    def close(self) -> None:
+        client = self._client
+        self._client = None
+        self._active = None
+        if client is not None:
+            client.close()
+
+    def _require_client(self) -> RelayClient:
+        if self._client is None:
+            self.open()
+        assert self._client is not None
+        return self._client
+
+    def write_raw(self, data: bytes) -> None:
+        self._require_client().write_raw(data)
+
+    def read_raw(self, max_size: int = -1) -> bytes:
+        return self._require_client().read_raw(max_size)
+
+    def has_pending_read_data(self) -> bool:
+        pending = getattr(self._require_client(), 'has_pending_read_data', None)
+        return bool(callable(pending) and pending())
+
+    def device_clear(self) -> None:
+        self._require_client().device_clear()
+
+
+def _make_target_factory(route: list[AddressInfo], log):
+    return lambda: _RoutedTargetClient(route, log)
+
+
 def _pick_target_address(
     target_by_proto: dict,
     src_proto: Transport,
 ) -> AddressInfo:
-    """Pick a target AddressInfo for an incoming source protocol.
-
-    Same-protocol passthrough wins; otherwise fall back HiSLIP > VXI-11 >
-    SOCKET. The caller must pass a non-empty ``target_by_proto``.
-    """
-    if src_proto in target_by_proto:
-        return target_by_proto[src_proto]
-    for proto in _TARGET_FALLBACK_ORDER:
-        if proto in target_by_proto:
-            return target_by_proto[proto]
-    raise ValueError('目标未启用任何协议')
+    """Return the first target address for compatibility with old callers."""
+    return _target_route(target_by_proto, src_proto)[0]
 
 
 class JsApi:
@@ -344,16 +446,16 @@ class JsApi:
             started: list = []
             try:
                 for src_addr in source_addrs:
-                    tgt_addr = _pick_target_address(target_by_proto, src_addr.transport)
-                    target_factory = (lambda info: lambda: make_target(info))(tgt_addr)
+                    target_route = _target_route(target_by_proto, src_addr.transport)
+                    target_factory = _make_target_factory(target_route, self.push_log)
                     src = make_source(src_addr, target_factory, self.push_log)
                     src.start()
-                    started.append((src_addr, tgt_addr, src))
+                    started.append((src_addr, target_route, src))
                     self.push_log(
                         'INFO',
                         f'  · {_TRANSPORT_LABELS[src_addr.transport]} '
                         f'{src_addr.raw} → '
-                        f'{_TRANSPORT_LABELS[tgt_addr.transport]} {tgt_addr.raw}',
+                        f'{_format_target_route(target_route)}',
                     )
 
                 self._sources = [s for _, _, s in started]
@@ -425,6 +527,7 @@ def main():
         width=960,
         height=720,
         confirm_close=True,
+        text_select=True,
     )
     api.attach_window(window)
 

@@ -78,6 +78,7 @@ MSG_ASYNC_LOCK_INFO_RESPONSE = 25
 DEFAULT_PROTOCOL_VERSION = 0x0100
 DEFAULT_VENDOR_ID = b'XX'
 DEFAULT_MAX_MESSAGE_SIZE = 1 << 20  # 1 MiB
+LINE_TERMINATOR = b'\n'
 
 
 def pack_header(
@@ -140,6 +141,7 @@ class HislipTargetClient(RelayClient):
         self._async: Optional[socket.socket] = None
         self._async_lock = threading.Lock()
         self._sync_lock = threading.Lock()
+        self._pending_response = bytearray()
         self._message_id: int = 0xFFFF_FF00
 
     # -- session lifecycle --
@@ -198,6 +200,7 @@ class HislipTargetClient(RelayClient):
         self._async = async_sock
 
     def close(self) -> None:
+        self._pending_response.clear()
         for attr in ('_sync', '_async'):
             sock = getattr(self, attr)
             setattr(self, attr, None)
@@ -222,6 +225,10 @@ class HislipTargetClient(RelayClient):
         if self._sync is None:
             self.open()
         assert self._sync is not None
+        # VXI-11 writes carry end-of-message out of band, but many SCPI-over-
+        # HiSLIP instruments still expect LF in the payload, like SOCKET mode.
+        if data and not data.endswith(LINE_TERMINATOR):
+            data = data + LINE_TERMINATOR
         chunk_size = max(self.max_message_size - HEADER_SIZE, 1024)
         with self._sync_lock:
             offset = 0
@@ -248,28 +255,42 @@ class HislipTargetClient(RelayClient):
         if self._sync is None:
             self.open()
         assert self._sync is not None
-        limit = max_size if max_size and max_size > 0 else 1 << 30
-        buf = bytearray()
+        limit = max_size if max_size and max_size > 0 else None
         with self._sync_lock:
-            while True:
-                msg_type, _ctrl, _mparam, payload = read_message(self._sync)
-                if msg_type in (MSG_DATA, MSG_DATA_END):
-                    buf.extend(payload)
-                    if len(buf) > limit:
-                        del buf[limit:]
-                    if msg_type == MSG_DATA_END:
-                        break
-                elif msg_type in (MSG_FATAL_ERROR, MSG_ERROR):
-                    raise IOError(
-                        f'hislip remote error type={msg_type} '
-                        f'msg={payload.decode("ascii", errors="replace")!r}'
-                    )
-                elif msg_type == MSG_INTERRUPTED:
-                    # Clear any partial data and continue waiting.
-                    buf.clear()
-                else:
-                    # Unhandled informational message — keep going.
-                    continue
+            if not self._pending_response:
+                self._pending_response.extend(self._read_response_locked())
+            if limit is None or len(self._pending_response) <= limit:
+                data = bytes(self._pending_response)
+                self._pending_response.clear()
+                return data
+            data = bytes(self._pending_response[:limit])
+            del self._pending_response[:limit]
+            return data
+
+    def has_pending_read_data(self) -> bool:
+        with self._sync_lock:
+            return bool(self._pending_response)
+
+    def _read_response_locked(self) -> bytes:
+        assert self._sync is not None
+        buf = bytearray()
+        while True:
+            msg_type, _ctrl, _mparam, payload = read_message(self._sync)
+            if msg_type in (MSG_DATA, MSG_DATA_END):
+                buf.extend(payload)
+                if msg_type == MSG_DATA_END:
+                    break
+            elif msg_type in (MSG_FATAL_ERROR, MSG_ERROR):
+                raise IOError(
+                    f'hislip remote error type={msg_type} '
+                    f'msg={payload.decode("ascii", errors="replace")!r}'
+                )
+            elif msg_type == MSG_INTERRUPTED:
+                # Clear any partial data and continue waiting.
+                buf.clear()
+            else:
+                # Unhandled informational message — keep going.
+                continue
         return bytes(buf)
 
     def device_clear(self) -> None:
@@ -317,6 +338,7 @@ class HislipTargetClient(RelayClient):
                     )
                 # Per spec, in-flight Data/DataEnd before the ack are discarded.
             self._message_id = 0xFFFF_FF00
+            self._pending_response.clear()
 
 
 # ---- Source server --------------------------------------------------------
