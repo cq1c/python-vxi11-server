@@ -139,6 +139,14 @@ class RelayClient(ABC):
     @abstractmethod
     def read_raw(self, max_size: int = -1) -> bytes: ...
 
+    def device_clear(self) -> None:
+        """Send a device clear to the upstream instrument.
+
+        Default is a no-op for transports without an out-of-band clear
+        (e.g. raw TCP SOCKET). VXI-11 and HiSLIP override this.
+        """
+        return None
+
 
 TargetFactory = Callable[[], RelayClient]
 

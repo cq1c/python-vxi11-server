@@ -272,6 +272,52 @@ class HislipTargetClient(RelayClient):
                     continue
         return bytes(buf)
 
+    def device_clear(self) -> None:
+        """Run the IVI-6.1 device-clear handshake against the upstream.
+
+        Async: AsyncDeviceClear → AsyncDeviceClearAcknowledge (negotiates
+        the feature bitmap). Sync: DeviceClearComplete → DeviceClearAcknowledge.
+        After the sync exchange both sides reset their MessageID counters.
+        """
+        if self._sync is None:
+            self.open()
+        assert self._sync is not None and self._async is not None
+
+        with self._async_lock:
+            self._async.sendall(
+                pack_header(MSG_ASYNC_DEVICE_CLEAR, control_code=0, message_parameter=0)
+            )
+            while True:
+                msg_type, ctrl, _mparam, payload = read_message(self._async)
+                if msg_type == MSG_ASYNC_DEVICE_CLEAR_ACKNOWLEDGE:
+                    feature_bitmap = ctrl
+                    break
+                if msg_type in (MSG_FATAL_ERROR, MSG_ERROR):
+                    raise IOError(
+                        f'hislip device_clear async error type={msg_type} '
+                        f'msg={payload.decode("ascii", errors="replace")!r}'
+                    )
+
+        with self._sync_lock:
+            self._sync.sendall(
+                pack_header(
+                    MSG_DEVICE_CLEAR_COMPLETE,
+                    control_code=feature_bitmap,
+                    message_parameter=0,
+                )
+            )
+            while True:
+                msg_type, _ctrl, _mparam, payload = read_message(self._sync)
+                if msg_type == MSG_DEVICE_CLEAR_ACKNOWLEDGE:
+                    break
+                if msg_type in (MSG_FATAL_ERROR, MSG_ERROR):
+                    raise IOError(
+                        f'hislip device_clear sync error type={msg_type} '
+                        f'msg={payload.decode("ascii", errors="replace")!r}'
+                    )
+                # Per spec, in-flight Data/DataEnd before the ack are discarded.
+            self._message_id = 0xFFFF_FF00
+
 
 # ---- Source server --------------------------------------------------------
 
@@ -336,6 +382,10 @@ class _HislipSession:
         self.max_message_size = DEFAULT_MAX_MESSAGE_SIZE
         self._closed = False
         self._lock = threading.Lock()
+        # Set by run_async after AsyncDeviceClearAcknowledge so run_sync knows
+        # the next sync-side message is expected to be DeviceClearComplete.
+        self._device_clear_in_progress = threading.Event()
+        self._device_clear_feature_bitmap = 0
 
     # -- handshake helpers --
 
@@ -378,6 +428,12 @@ class _HislipSession:
         try:
             while not self._closed:
                 msg_type, _ctrl, mparam, payload = read_message(self.sync_sock)
+                if self._device_clear_in_progress.is_set() and msg_type != MSG_DEVICE_CLEAR_COMPLETE:
+                    # Spec: discard any in-flight Data/DataEnd that arrived
+                    # before DeviceClearComplete; do not pass to upstream.
+                    buf.clear()
+                    request_message_id = None
+                    continue
                 if msg_type == MSG_DATA:
                     if request_message_id is None:
                         request_message_id = mparam
@@ -389,6 +445,17 @@ class _HislipSession:
                     self._handle_request(bytes(buf), request_message_id or 0)
                     buf.clear()
                     request_message_id = None
+                elif msg_type == MSG_DEVICE_CLEAR_COMPLETE:
+                    self.sync_sock.sendall(
+                        pack_header(
+                            MSG_DEVICE_CLEAR_ACKNOWLEDGE,
+                            control_code=self._device_clear_feature_bitmap,
+                            message_parameter=0,
+                        )
+                    )
+                    buf.clear()
+                    request_message_id = None
+                    self._device_clear_in_progress.clear()
                 elif msg_type == MSG_TRIGGER:
                     self.log('INFO', 'HiSLIP: TRIGGER 已忽略')
                 elif msg_type in (MSG_FATAL_ERROR, MSG_ERROR):
@@ -435,10 +502,20 @@ class _HislipSession:
                         pack_header(MSG_ASYNC_LOCK_INFO_RESPONSE, message_parameter=0)
                     )
                 elif msg_type == MSG_ASYNC_DEVICE_CLEAR:
+                    # Forward to upstream before acknowledging so the real
+                    # instrument is actually cleared. Feature negotiation
+                    # bitmap stays 0 (no overlap mode).
+                    if self.client is not None:
+                        try:
+                            self.client.device_clear()
+                        except Exception as exc:
+                            self.log('ERROR', f'HiSLIP 上游 device_clear 失败: {exc}')
+                    self._device_clear_feature_bitmap = 0
+                    self._device_clear_in_progress.set()
                     self.async_sock.sendall(
                         pack_header(
                             MSG_ASYNC_DEVICE_CLEAR_ACKNOWLEDGE,
-                            control_code=0,
+                            control_code=self._device_clear_feature_bitmap,
                             message_parameter=0,
                         )
                     )

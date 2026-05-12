@@ -94,6 +94,12 @@ class Vxi11TargetClient(RelayClient):
     def has_pending_read_data(self) -> bool:
         return self._last_read_reason & (_vxi11.RX_END | _vxi11.RX_CHR) == 0
 
+    def device_clear(self) -> None:
+        if self._instr is None:
+            self.open()
+        assert self._instr is not None
+        self._instr.clear()
+
 
 class Vxi11SourceServer(RelaySource):
     """Hosts a VXI-11 service that proxies RPCs to a target client.
@@ -213,6 +219,17 @@ def _build_relay_device(target_factory: TargetFactory, log: LogSink):
             except Exception as exc:
                 self._log('ERROR', f'read 失败: {exc}')
                 return Error.IO_ERROR, ReadRespReason.END, b''
+
+        def device_clear(self, flags, io_timeout):
+            if self._client is None:
+                return Error.IO_ERROR
+            try:
+                self._client.device_clear()
+                self._log('DEBUG', 'device_clear forwarded')
+                return Error.NO_ERROR
+            except Exception as exc:
+                self._log('ERROR', f'device_clear 失败: {exc}')
+                return Error.IO_ERROR
 
         def __del__(self):
             client = getattr(self, '_client', None)
