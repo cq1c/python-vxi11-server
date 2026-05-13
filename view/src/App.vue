@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { CaretRight, VideoPause, Delete } from '@element-plus/icons-vue'
+import {
+  ArrowDown,
+  CaretRight,
+  Delete,
+  QuestionFilled,
+  Setting,
+  VideoPause,
+} from '@element-plus/icons-vue'
 
 interface ApiResult {
   ok: boolean
@@ -20,6 +27,10 @@ interface EndpointConfig {
   socket: PortField
 }
 
+interface AppSettings {
+  same_protocol_direct: boolean
+}
+
 type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR'
 
 interface PyApi {
@@ -30,14 +41,19 @@ interface PyApi {
     source: EndpointConfig | null
     target: EndpointConfig | null
     log_level?: LogLevel
+    settings?: AppSettings
   }>
   get_default_endpoints: () => Promise<{ source: EndpointConfig; target: EndpointConfig }>
   get_persisted_state: () => Promise<{
     source: EndpointConfig | null
     target: EndpointConfig | null
     log_level: LogLevel
+    settings?: AppSettings
   }>
   set_log_level: (level: LogLevel) => Promise<ApiResult & { level?: LogLevel }>
+  update_settings: (
+    patch: Partial<AppSettings>,
+  ) => Promise<ApiResult & { settings?: AppSettings }>
 }
 
 interface LogEntry {
@@ -50,7 +66,12 @@ const STORAGE_KEYS = {
   // v2: structured config replaces VISA strings. Older keys are abandoned.
   form: 'visa-mapping-form-v2',
   logs: 'visa-mapping-logs',
+  settings: 'visa-mapping-settings-v1',
 } as const
+
+const DEFAULT_SETTINGS: AppSettings = {
+  same_protocol_direct: false,
+}
 const MAX_LOGS = 1000
 const HISLIP_DEFAULT_PORT = 4880
 const SOCKET_DEFAULT_PORT = 5025
@@ -75,6 +96,7 @@ const logs = ref<LogEntry[]>([])
 const logBox = ref<HTMLDivElement>()
 const formError = ref('')
 const logLevel = ref<LogLevel>('INFO')
+const settings = reactive<AppSettings>({ ...DEFAULT_SETTINGS })
 
 const LOG_LEVEL_OPTIONS: { value: LogLevel; label: string }[] = [
   { value: 'DEBUG', label: 'DEBUG' },
@@ -129,6 +151,18 @@ function isLogEntry(value: unknown): value is LogEntry {
   )
 }
 
+function isAppSettings(value: unknown): value is AppSettings {
+  if (!value || typeof value !== 'object') return false
+  const v = value as Partial<AppSettings>
+  return typeof v.same_protocol_direct === 'boolean'
+}
+
+function applySettings(value: Partial<AppSettings>) {
+  if (typeof value.same_protocol_direct === 'boolean') {
+    settings.same_protocol_direct = value.same_protocol_direct
+  }
+}
+
 function isEndpointConfig(value: unknown): value is EndpointConfig {
   if (!value || typeof value !== 'object') return false
   const v = value as Partial<EndpointConfig>
@@ -158,6 +192,21 @@ function restoreForm() {
     // ignore malformed
   }
   return false
+}
+
+function restoreSettings() {
+  const raw = readStorageItem(STORAGE_KEYS.settings)
+  if (!raw) return
+  try {
+    const saved = JSON.parse(raw)
+    if (isAppSettings(saved)) applySettings(saved)
+  } catch {
+    // ignore malformed
+  }
+}
+
+function persistSettings() {
+  writeStorageItem(STORAGE_KEYS.settings, JSON.stringify(settings))
 }
 
 function restoreLogs() {
@@ -251,8 +300,20 @@ function validateEndpoint(label: string, cfg: EndpointConfig): string | null {
 }
 
 restoreForm()
+restoreSettings()
 restoreLogs()
 watch(form, persistForm, { deep: true })
+
+async function onSettingChange() {
+  persistSettings()
+  const bridge = api()
+  if (!bridge) return
+  try {
+    await bridge.update_settings({ same_protocol_direct: settings.same_protocol_direct })
+  } catch {
+    // bridge errors are non-fatal — value is already persisted locally
+  }
+}
 
 async function onLogLevelChange(level: LogLevel) {
   logLevel.value = level
@@ -317,6 +378,10 @@ onMounted(async () => {
   if (status.log_level) {
     logLevel.value = status.log_level
   }
+  if (status.settings && isAppSettings(status.settings)) {
+    applySettings(status.settings)
+    persistSettings()
+  }
   if (status.running) {
     running.value = true
     if (status.source) Object.assign(form.source, status.source)
@@ -329,6 +394,10 @@ onMounted(async () => {
   const persisted = await bridge.get_persisted_state()
   if (persisted.log_level) {
     logLevel.value = persisted.log_level
+  }
+  if (persisted.settings && isAppSettings(persisted.settings)) {
+    applySettings(persisted.settings)
+    persistSettings()
   }
   if (persisted.source && isEndpointConfig(persisted.source)) {
     Object.assign(form.source, persisted.source)
@@ -348,11 +417,54 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="app-shell">
+  <div class="app-root">
+    <header class="top-bar">
+      <div class="top-bar-title">VISA 设备映射工具</div>
+      <el-dropdown trigger="click" :hide-on-click="false" placement="bottom-end">
+        <el-button text class="top-bar-trigger">
+          <el-icon class="top-bar-icon"><Setting /></el-icon>
+          <span>设置</span>
+          <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+        </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <div class="settings-row" @click.stop>
+              <span class="settings-label">同协议直连</span>
+              <el-tooltip placement="left" effect="dark" :show-after="120">
+                <template #content>
+                  <div class="settings-tooltip">
+                    <div>
+                      勾选后：客户端用什么协议（HiSLIP 或 SOCKET）连进来，
+                      只要远程设备也启用了同样的协议，就直接把 TCP
+                      字节流转过去，不再拆包/重组。
+                    </div>
+                    <div class="tooltip-block">
+                      · 延迟更低<br />
+                      · 厂商私有指令也能原样透传
+                    </div>
+                    <div>
+                      不勾选（默认）：始终走协议级解析后再转发，
+                      程序更可控，便于多客户端共享。
+                    </div>
+                  </div>
+                </template>
+                <el-icon class="settings-help"><QuestionFilled /></el-icon>
+              </el-tooltip>
+              <el-switch
+                v-model="settings.same_protocol_direct"
+                @change="onSettingChange"
+              />
+            </div>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
+    </header>
+
+    <main class="app-shell">
     <el-card class="panel" shadow="never">
       <template #header>
         <div class="panel-header">
-          <span>VISA 设备映射工具</span>
+          <span>映射配置</span>
           <el-tag :type="running ? 'success' : 'info'" effect="light" round>
             {{ running ? '运行中' : '已停止' }}
           </el-tag>
@@ -518,6 +630,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </el-card>
+    </main>
   </div>
 </template>
 
@@ -533,13 +646,78 @@ body,
 </style>
 
 <style scoped>
+.app-root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  box-sizing: border-box;
+}
+
 .app-shell {
   display: flex;
   flex-direction: column;
   gap: 16px;
   padding: 16px;
-  height: 100vh;
+  flex: 1;
+  min-height: 0;
   box-sizing: border-box;
+}
+
+.top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  height: 48px;
+  background: #fff;
+  border-bottom: 1px solid #e4e7ed;
+  flex-shrink: 0;
+}
+
+.top-bar-title {
+  font-weight: 600;
+  font-size: 15px;
+  color: #303133;
+}
+
+.top-bar-trigger {
+  font-size: 14px;
+  color: #606266;
+}
+
+.top-bar-icon {
+  margin-right: 4px;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  min-width: 240px;
+  cursor: default;
+}
+
+.settings-label {
+  flex: 1;
+  font-size: 14px;
+  color: #303133;
+}
+
+.settings-help {
+  color: #909399;
+  font-size: 15px;
+  cursor: help;
+}
+
+.settings-tooltip {
+  max-width: 260px;
+  line-height: 1.6;
+  font-size: 12px;
+}
+
+.tooltip-block {
+  margin: 6px 0;
 }
 
 .panel {

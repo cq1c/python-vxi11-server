@@ -150,6 +150,10 @@ _LOG_PRIORITY = {
 }
 _DEFAULT_LOG_LEVEL = 'INFO'
 
+_DEFAULT_SETTINGS: dict = {
+    'same_protocol_direct': False,
+}
+
 # A fixed subdir under the OS temp dir. tempfile.gettempdir() returns a
 # stable location across launches (/tmp on Linux, %TEMP% on Windows), so
 # data saved here survives restarts. Intentionally NOT sys._MEIPASS,
@@ -345,6 +349,7 @@ class JsApi:
         self._target_config: dict | None = None
         self._lock = threading.Lock()
         self._log_level = _DEFAULT_LOG_LEVEL
+        self._settings: dict = dict(_DEFAULT_SETTINGS)
         self._persisted: dict = self._load_persisted()
 
     def attach_window(self, window: 'webview.Window') -> None:
@@ -363,6 +368,12 @@ class JsApi:
         level = data.get('log_level')
         if isinstance(level, str) and level.upper() in _LOG_PRIORITY:
             self._log_level = level.upper()
+        saved_settings = data.get('settings')
+        if isinstance(saved_settings, dict):
+            for key, default in _DEFAULT_SETTINGS.items():
+                value = saved_settings.get(key, default)
+                if isinstance(value, type(default)):
+                    self._settings[key] = value
         return data
 
     def _save_persisted(self) -> None:
@@ -370,6 +381,7 @@ class JsApi:
             'source': self._persisted.get('source'),
             'target': self._persisted.get('target'),
             'log_level': self._log_level,
+            'settings': dict(self._settings),
         }
         try:
             with _state_file_path().open('wb') as f:
@@ -402,6 +414,18 @@ class JsApi:
         self._save_persisted()
         return {'ok': True, 'level': level_up}
 
+    def update_settings(self, patch):
+        if not isinstance(patch, dict):
+            return {'ok': False, 'message': '设置参数无效'}
+        for key, value in patch.items():
+            if key not in _DEFAULT_SETTINGS:
+                continue
+            default = _DEFAULT_SETTINGS[key]
+            if isinstance(value, type(default)):
+                self._settings[key] = value
+        self._save_persisted()
+        return {'ok': True, 'settings': dict(self._settings)}
+
     # ---- public js api ------------------------------------------------
 
     def get_status(self):
@@ -410,6 +434,7 @@ class JsApi:
             'source': self._source_config,
             'target': self._target_config,
             'log_level': self._log_level,
+            'settings': dict(self._settings),
         }
 
     def get_persisted_state(self):
@@ -417,6 +442,7 @@ class JsApi:
             'source': self._persisted.get('source'),
             'target': self._persisted.get('target'),
             'log_level': self._log_level,
+            'settings': dict(self._settings),
         }
 
     def get_default_endpoints(self):
