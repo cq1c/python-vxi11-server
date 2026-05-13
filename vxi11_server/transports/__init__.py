@@ -20,6 +20,7 @@ from .base import (
     parse_address,
 )
 from .factory import make_source, make_target
+from .passthrough import make_passthrough_source
 
 __all__ = [
     'AddressInfo',
@@ -29,4 +30,5 @@ __all__ = [
     'parse_address',
     'make_source',
     'make_target',
+    'make_passthrough_source',
 ]

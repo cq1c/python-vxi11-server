@@ -31,6 +31,7 @@ from vxi11_server.transports import (
     AddressInfo,
     RelayClient,
     Transport,
+    make_passthrough_source,
     make_source,
     make_target,
 )
@@ -468,23 +469,35 @@ class JsApi:
             self._save_persisted()
 
             target_by_proto = {a.transport: a for a in target_addrs}
+            same_proto_direct = bool(self._settings.get('same_protocol_direct'))
 
             started: list = []
             try:
                 for src_addr in source_addrs:
-                    target_route = _target_route(target_by_proto, src_addr.transport)
-                    target_factory = _make_target_factory(target_route, self.push_log)
-                    src = make_source(src_addr, target_factory, self.push_log)
+                    same_target = target_by_proto.get(src_addr.transport)
+                    use_direct = same_proto_direct and same_target is not None
+                    if use_direct:
+                        src = make_passthrough_source(
+                            src_addr, same_target, self.push_log,
+                        )
+                        route_label = (
+                            f'{_TRANSPORT_LABELS[same_target.transport]} '
+                            f'{same_target.raw} [TCP 直转]'
+                        )
+                    else:
+                        target_route = _target_route(target_by_proto, src_addr.transport)
+                        target_factory = _make_target_factory(target_route, self.push_log)
+                        src = make_source(src_addr, target_factory, self.push_log)
+                        route_label = _format_target_route(target_route)
                     src.start()
-                    started.append((src_addr, target_route, src))
+                    started.append((src_addr, src))
                     self.push_log(
                         'INFO',
                         f'  · {_TRANSPORT_LABELS[src_addr.transport]} '
-                        f'{src_addr.raw} → '
-                        f'{_format_target_route(target_route)}',
+                        f'{src_addr.raw} → {route_label}',
                     )
 
-                self._sources = [s for _, _, s in started]
+                self._sources = [s for _, s in started]
                 self._running = True
                 self._source_config = source
                 self._target_config = target
@@ -496,7 +509,7 @@ class JsApi:
             except Exception as exc:
                 message = format_exception(exc)
                 self.push_log('ERROR', f'启动失败: {message}')
-                for _, _, src in started:
+                for _, src in started:
                     try:
                         src.stop()
                     except Exception:
